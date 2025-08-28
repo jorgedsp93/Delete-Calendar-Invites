@@ -1,0 +1,87 @@
+/**
+ * Deletes ALL "Away" all‑day events you organized on your PRIMARY calendar
+ * that overlap the window (even if they started before the window).
+ * No emails are sent to guests (sendUpdates:'none').
+ *
+ * Edit START_YMD / END_YMD_EXCLUSIVE to your window.
+ */
+function deleteMyAwayAllDay_onPrimary_byDay() {
+  // ---- window (inclusive start, exclusive end) ----
+  var START_YMD = '2025-08-01';
+  var END_YMD_EXCLUSIVE = '2025-09-01';
+
+  // ---- nothing to change below ----
+  var TZ = Session.getScriptTimeZone();
+  var myEmail = (Session.getEffectiveUser().getEmail() || '').toLowerCase();
+
+  var start = new Date(START_YMD + 'T00:00:00');
+  var end   = new Date(END_YMD_EXCLUSIVE + 'T00:00:00');
+
+  var cal = CalendarApp.getDefaultCalendar();       // PRIMARY only
+  var seenIds = Object.create(null);                // dedupe multi‑day items
+  var daysScanned = 0, checked = 0, matched = 0, deleted = 0, failed = 0,
+      skippedNotAllDay = 0, skippedNotMine = 0;
+
+  function addDays(d, n) { var x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+
+  for (var d = new Date(start); d < end; d = addDays(d, 1)) {
+    daysScanned++;
+    // This returns ALL events that occur on that day (not just those that start that day).
+    var events = cal.getEventsForDay(d);
+    for (var i = 0; i < events.length; i++) {
+      var ev = events[i];
+      checked++;
+
+      // Must mention "away" in title/description
+      var title = ev.getTitle() || '';
+      var desc  = (ev.getDescription && ev.getDescription()) || '';
+      var text  = (title + ' ' + desc).toLowerCase();
+      if (text.indexOf('away') === -1) continue;
+
+      // Only all‑day items
+      if (!ev.isAllDayEvent()) { skippedNotAllDay++; continue; }
+
+      // Dedupe across the many days the same all‑day event spans
+      var id = ev.getId();
+      if (seenIds[id]) continue;
+      seenIds[id] = true;
+
+      try {
+        // Read REST event so we can confirm organizer/creator and delete with no emails
+        var apiEv = Calendar.Events.get('primary', id);
+
+        var orgSelf = apiEv.organizer && apiEv.organizer.self === true;
+        var orgMine = apiEv.organizer && (apiEv.organizer.email || '').toLowerCase() === myEmail;
+        var crtMine = apiEv.creator   && (apiEv.creator.email   || '').toLowerCase() === myEmail;
+        if (!(orgSelf || orgMine || crtMine)) { skippedNotMine++; continue; }
+
+        // Delete WITHOUT notifying anyone
+        Calendar.Events.remove('primary', id, { sendUpdates: 'none' });
+
+        matched++; deleted++;
+
+        var sOut = apiEv.start.dateTime ? Utilities.formatDate(new Date(apiEv.start.dateTime), TZ, 'yyyy-MM-dd')
+                                        : apiEv.start.date;
+        var eOut = apiEv.end.dateTime   ? Utilities.formatDate(new Date(apiEv.end.dateTime),   TZ, 'yyyy-MM-dd')
+                                        : apiEv.end.date;
+
+        Logger.log('DELETED "%s"  %s → %s  (id=%s)', apiEv.summary || '(no title)', sOut, eOut, id);
+
+      } catch (err) {
+        failed++;
+        Logger.log('FAILED (id=%s, title="%s"): %s', id, title, err);
+      }
+    }
+  }
+
+  Logger.log(JSON.stringify({
+    window: { startInclusive: START_YMD, endExclusive: END_YMD_EXCLUSIVE },
+    daysScanned: daysScanned,
+    eventsChecked: checked,
+    matchedAwayAllDay: matched,
+    deleted: deleted,
+    skippedNotAllDay: skippedNotAllDay,
+    skippedNotMine: skippedNotMine,
+    failed: failed
+  }, null, 2));
+}
